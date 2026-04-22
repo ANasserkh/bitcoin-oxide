@@ -1,9 +1,28 @@
+use crate::sha256::Hash;
+use ecdsa::signature::{Signer, Verifier};
 use ecdsa::{Signature as ECDSASignature, SigningKey, VerifyingKey};
 use k256::Secp256k1;
 use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 
-pub struct Signature(ECDSASignature<Secp256k1>);
+pub struct Signature(pub ECDSASignature<Secp256k1>);
+
+impl Signature {
+    // sign a crate::types::TransactionOutput from its Sha256 hash
+    pub fn sign_output(output_hash: &Hash, private_key: &PrivateKey) -> Self {
+        let signing_key = &private_key.0;
+        let signature = signing_key.try_sign(&output_hash.as_bytes()).unwrap();
+        Signature(signature)
+    }
+    // verify a signature
+    pub fn verify(&self, output_hash: &Hash, public_key: &PublicKey) -> bool {
+        public_key
+            .0
+            .verify(&output_hash.as_bytes(), &self.0)
+            .is_ok()
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct PublicKey(VerifyingKey<Secp256k1>);
