@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::{BtcError, Result};
 use crate::{
@@ -7,6 +7,7 @@ use crate::{
     sha256::Hash,
     util::MerkleRoot,
 };
+use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -15,6 +16,8 @@ use uuid::Uuid;
 pub struct Blockchain {
     pub blocks: Vec<Block>,
     pub utxos: HashMap<Hash, TransactionOutput>,
+    pub target: U256,
+    pub mempool: Vec<Transaction>,
 }
 
 impl Blockchain {
@@ -22,6 +25,8 @@ impl Blockchain {
         Blockchain {
             blocks: vec![],
             utxos: HashMap::new(),
+            target: crate::MIN_TARGET,
+            mempool: vec![],
         }
     }
     pub fn add_block(&mut self, block: Block) -> Result<()> {
@@ -64,7 +69,17 @@ impl Blockchain {
             // Verify all transactions in the block
             block.verify_transactions(self.block_height(), &self.utxos)?;
         }
+
+        let block_transactions: HashSet<_> =
+            block.transactions.iter().map(|tx| tx.hash()).collect();
+
+        self.mempool
+            .retain(|tx| !block_transactions.contains(&tx.hash()));
+
         self.blocks.push(block);
+
+        self.try_adjust_target();
+
         Ok(())
     }
     pub fn block_height(&self) -> u64 {
@@ -81,6 +96,57 @@ impl Blockchain {
                 }
             }
         }
+    }
+
+    pub fn try_adjust_target(&mut self) {
+        if self.blocks.is_empty() {
+            return;
+        }
+        if self.blocks.len() % crate::DIFFICULTY_UPDATE_INTERVAL as usize != 0 {
+            return;
+        }
+        // measure the time it took to mine the last
+        let start_time = self.blocks
+            [self.blocks.len() - crate::DIFFICULTY_UPDATE_INTERVAL as usize]
+            .header
+            .timestamp;
+
+        let end_time = self.blocks.last().unwrap().header.timestamp;
+        let time_diff = end_time - start_time;
+
+        // convert time_diff to seconds
+        let time_diff_seconds = time_diff.num_seconds();
+
+        // calculate the ideal number of seconds
+        let target_seconds = crate::IDEAL_BLOCK_TIME * crate::DIFFICULTY_UPDATE_INTERVAL;
+
+        // multiply the current target by actual time
+        let new_target = BigDecimal::parse_bytes(&self.target.to_string().as_bytes(), 10)
+            .expect("BUG: impossible")
+            * (BigDecimal::from(time_diff_seconds) / BigDecimal::from(target_seconds));
+
+        let new_target_str = new_target
+            .to_string()
+            .split('.')
+            .next()
+            .expect("BUG: Expected a decimal point")
+            .to_owned();
+
+        let new_target: U256 = U256::from_str_radix(&new_target_str, 10).expect("BUG: impossible");
+
+        // clamp new_target to be within the range of
+        // 4 * self.target and self.target / 4
+        let new_target = if new_target < self.target / 4 {
+            self.target / 4
+        } else if new_target > self.target * 4 {
+            self.target * 4
+        } else {
+            new_target
+        };
+
+        // if the new target is more than the minimum target,
+        // set it to the minimum target
+        self.target = new_target.min(crate::MIN_TARGET);
     }
 }
 
